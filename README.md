@@ -8,7 +8,8 @@ A Stremio catalog addon that pulls movie and series metadata from Port.hu and ex
 - Multiple extraction strategies for source resilience:
   - JSON-LD parsing (`Movie`, `TVSeries`, `ItemList`)
   - DOM card-style parsing fallback
-- Stable deterministic meta IDs
+- IMDb-backed IDs when discoverable (better cross-addon stream compatibility)
+- Stable deterministic fallback IDs
 - Deduplication and optional genre filtering
 - Vercel-compatible API route included
 - Supports both Stremio catalog URL variants:

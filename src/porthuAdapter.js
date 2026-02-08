@@ -73,6 +73,12 @@ function makeMetaId(type, canonicalUrl, name) {
   return `porthu:${type}:h-${hash}`
 }
 
+function extractImdbId(value) {
+  const text = String(value || '')
+  const m = text.match(/tt[0-9]{5,10}/i)
+  return m ? m[0].toLowerCase() : null
+}
+
 function parseJsonLdBlocks($, pageUrl) {
   const scripts = $('script[type="application/ld+json"]').toArray()
   const items = []
@@ -202,15 +208,18 @@ function toMeta(targetType, row) {
   const name = sanitizeText(row.name)
   if (!name) return null
 
+  const imdbId = extractImdbId(row.imdbId || canonicalUrl)
+
   return {
-    id: makeMetaId(type, canonicalUrl, name),
+    id: imdbId || makeMetaId(type, canonicalUrl, name),
     type,
     name,
     poster: row.poster || undefined,
     description: row.description || undefined,
     releaseInfo: row.releaseInfo || undefined,
     genres: row.genre ? row.genre.split(',').map((g) => sanitizeText(g)).filter(Boolean) : undefined,
-    website: canonicalUrl || undefined
+    website: canonicalUrl || undefined,
+    imdb_id: imdbId || undefined
   }
 }
 
@@ -252,7 +261,12 @@ async function fetchDetailHints(detailUrl) {
         $('meta[property="og:description"]').attr('content') ||
           $('meta[name="description"]').attr('content')
       ),
-      name: sanitizeText($('meta[property="og:title"]').attr('content') || $('h1').first().text())
+      name: sanitizeText($('meta[property="og:title"]').attr('content') || $('h1').first().text()),
+      imdbId: extractImdbId(
+        $('a[href*="imdb.com/title/tt"]').attr('href') ||
+          $('meta[property="og:see_also"]').attr('content') ||
+          data
+      )
     }
     DETAIL_CACHE.set(url, hint)
     return hint
@@ -264,13 +278,21 @@ async function fetchDetailHints(detailUrl) {
 }
 
 async function enrichRows(rows) {
-  const missing = rows.filter((r) => !r.poster && r.url).slice(0, 50)
+  const missing = rows.filter((r) => (!r.poster || !r.imdbId) && r.url).slice(0, 120)
   for (const row of missing) {
     const hint = await fetchDetailHints(row.url)
     if (!row.poster && isPosterUrl(hint.poster)) row.poster = hint.poster
     if (!row.description && hint.description) row.description = hint.description
     if ((!row.name || row.name.length < 2) && hint.name) row.name = hint.name
+    if (!row.imdbId && hint.imdbId) row.imdbId = hint.imdbId
   }
+}
+
+function rowMatchesType(targetType, row) {
+  const url = String(row.url || '').toLowerCase()
+  if (targetType === 'movie') return url.includes('/adatlap/film/') && !url.includes('/adatlap/sorozat/')
+  if (targetType === 'series') return url.includes('/adatlap/sorozat/')
+  return true
 }
 
 async function fetchOneCatalogPage(url) {
@@ -297,13 +319,14 @@ async function fetchCatalog({ type, genre, skip = 0, limit = 50 }) {
 
   await enrichRows(rows)
 
-  const metas = dedupeMetas(rows.map((r) => toMeta(type, r)).filter(Boolean))
+  const typedRows = rows.filter((r) => rowMatchesType(type, r))
+
+  const metas = dedupeMetas(typedRows.map((r) => toMeta(type, r)).filter(Boolean))
     .filter((meta) => {
       if (!genre) return true
       const genreNeedle = genre.toLowerCase()
       return (meta.genres || []).some((g) => g.toLowerCase().includes(genreNeedle))
     })
-    .filter((meta) => Boolean(meta.poster))
     .slice(skip, skip + limit)
 
   for (const meta of metas) {
