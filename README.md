@@ -55,6 +55,9 @@ Deploy with Vercel CLI or Git integration.
 - `PORT` (local server, default: `7000`)
 - `CATALOG_LIMIT` (max returned items per request, default: `50`, hard cap: `100`)
 - `PORT_HU_HTTP_TIMEOUT_MS` (source request timeout, default: `12000`)
+- `PORT_HU_PAGE_CACHE_TTL_MS` (parsed source-page cache TTL, default: `600000`)
+- `PORT_HU_CATALOG_CACHE_TTL_MS` (catalog response cache TTL, default: `300000`)
+- `PORT_HU_DETAIL_CONCURRENCY` (detail enrichment concurrency, default: `8`)
 
 ## Notes
 
@@ -69,3 +72,6 @@ Deploy with Vercel CLI or Git integration.
 
 
 - Provides an external stream item that opens the title on Port.hu when playback is requested.
+
+
+- Uses strict type separation (`/adatlap/film/` vs `/adatlap/sorozat/` + episode detection) to prevent movie/series mixing.

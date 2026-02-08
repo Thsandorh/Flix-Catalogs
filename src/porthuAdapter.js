@@ -6,6 +6,9 @@ const cheerio = require('cheerio')
 
 const SOURCE_NAME = 'port.hu'
 const DEFAULT_TIMEOUT_MS = Number(process.env.PORT_HU_HTTP_TIMEOUT_MS || 12000)
+const PAGE_CACHE_TTL_MS = Number(process.env.PORT_HU_PAGE_CACHE_TTL_MS || 10 * 60 * 1000)
+const CATALOG_CACHE_TTL_MS = Number(process.env.PORT_HU_CATALOG_CACHE_TTL_MS || 5 * 60 * 1000)
+const DETAIL_CONCURRENCY = Number(process.env.PORT_HU_DETAIL_CONCURRENCY || 8)
 
 const CATALOG_URLS = {
   movie: ['https://port.hu/film', 'https://port.hu/mozi', 'https://port.hu'],
@@ -14,6 +17,8 @@ const CATALOG_URLS = {
 
 const META_CACHE = new Map()
 const DETAIL_CACHE = new Map()
+const PAGE_CACHE = new Map()
+const CATALOG_CACHE = new Map()
 
 const http = axios.create({
   timeout: DEFAULT_TIMEOUT_MS,
@@ -38,7 +43,7 @@ function canonicalizeUrl(value) {
     url.search = ''
     return url.toString()
   } catch {
-    return value.split('#')[0].split('?')[0]
+    return String(value).split('#')[0].split('?')[0]
   }
 }
 
@@ -62,6 +67,12 @@ function extractEntityId(url) {
   return null
 }
 
+function extractImdbId(value) {
+  const text = String(value || '')
+  const m = text.match(/tt[0-9]{5,10}/i)
+  return m ? m[0].toLowerCase() : null
+}
+
 function makeMetaId(type, canonicalUrl, name) {
   const entityId = extractEntityId(canonicalUrl)
   if (entityId) return `porthu:${type}:${entityId}`
@@ -73,10 +84,11 @@ function makeMetaId(type, canonicalUrl, name) {
   return `porthu:${type}:h-${hash}`
 }
 
-function extractImdbId(value) {
-  const text = String(value || '')
-  const m = text.match(/tt[0-9]{5,10}/i)
-  return m ? m[0].toLowerCase() : null
+function isPosterUrl(url) {
+  const u = String(url || '')
+  if (!u) return false
+  if (u.includes('/img/agelimit/')) return false
+  return /\.(jpg|jpeg|png|webp)(\?|$)/i.test(u) || u.includes('/images/')
 }
 
 function parseJsonLdBlocks($, pageUrl) {
@@ -132,38 +144,31 @@ function parseJsonLdBlocks($, pageUrl) {
   return items
 }
 
-function isPosterUrl(url) {
-  const u = String(url || '')
-  if (!u) return false
-  if (u.includes('/img/agelimit/')) return false
-  return /\.(jpg|jpeg|png|webp)(\?|$)/i.test(u) || u.includes('/images/')
-}
-
 function parseDomCards($, pageUrl) {
   const items = []
-  const cardSelectors = ['a[href*="/adatlap/film/"]', 'a[href*="/adatlap/sorozat/"]', 'article a[href]']
+  const selectors = ['a[href*="/adatlap/film/"]', 'a[href*="/adatlap/sorozat/"]', 'article a[href]']
 
-  for (const sel of cardSelectors) {
+  for (const sel of selectors) {
     $(sel).each((_, el) => {
       const href = $(el).attr('href')
       const canonical = absolutize(pageUrl, href)
       if (!canonical || !canonical.includes('/adatlap/')) return
 
       const root = $(el).closest('article, .event-holder, .event-card, .card, .item, li, div')
-      const rawName =
+      const name = sanitizeText(
         $(el).attr('title') ||
-        $(el).attr('aria-label') ||
-        root.find('h1, h2, h3, h4, .title').first().text() ||
-        $(el).text()
-      const name = sanitizeText(rawName)
+          $(el).attr('aria-label') ||
+          root.find('h1, h2, h3, h4, .title').first().text() ||
+          $(el).text()
+      )
       if (!name || name.length < 2) return
 
-      const img = root.find('img').toArray().map((node) => $(node))
+      const imgs = root.find('img').toArray().map((node) => $(node))
       let poster = null
-      for (const tag of img) {
+      for (const img of imgs) {
         const candidate = absolutize(
           pageUrl,
-          tag.attr('src') || tag.attr('data-src') || tag.attr('data-original') || tag.attr('data-lazy')
+          img.attr('src') || img.attr('data-src') || img.attr('data-original') || img.attr('data-lazy')
         )
         if (isPosterUrl(candidate)) {
           poster = candidate
@@ -185,34 +190,37 @@ function parseDomCards($, pageUrl) {
       })
     })
 
-    if (items.length >= 350) break
+    if (items.length >= 400) break
   }
 
   return items
 }
 
-function normalizeType(targetType, row) {
-  if (targetType === 'series') return 'series'
-  if (targetType === 'movie') return 'movie'
+function rowMatchesType(targetType, row) {
+  const url = String(row.url || '').toLowerCase()
+  const hasEpisode = url.includes('episode-')
 
-  const bucket = `${row.url || ''} ${row.name || ''} ${row.genre || ''}`.toLowerCase()
-  if (bucket.includes('/adatlap/sorozat/') || bucket.includes('sorozat') || bucket.includes('series')) {
-    return 'series'
+  if (targetType === 'movie') {
+    return url.includes('/adatlap/film/') && !url.includes('/adatlap/sorozat/') && !hasEpisode
   }
-  return 'movie'
+
+  if (targetType === 'series') {
+    return url.includes('/adatlap/sorozat/') || hasEpisode
+  }
+
+  return true
 }
 
 function toMeta(targetType, row) {
   const canonicalUrl = canonicalizeUrl(row.url) || `urn:porthu:${row.name}`
-  const type = normalizeType(targetType, row)
   const name = sanitizeText(row.name)
   if (!name) return null
 
   const imdbId = extractImdbId(row.imdbId || canonicalUrl)
 
   return {
-    id: imdbId || makeMetaId(type, canonicalUrl, name),
-    type,
+    id: imdbId || makeMetaId(targetType, canonicalUrl, name),
+    type: targetType,
     name,
     poster: row.poster || undefined,
     description: row.description || undefined,
@@ -240,7 +248,8 @@ function dedupeMetas(metas) {
       description: prev.description || meta.description,
       releaseInfo: prev.releaseInfo || meta.releaseInfo,
       genres: prev.genres || meta.genres,
-      website: prev.website || meta.website
+      website: prev.website || meta.website,
+      imdb_id: prev.imdb_id || meta.imdb_id
     })
   }
 
@@ -277,49 +286,88 @@ async function fetchDetailHints(detailUrl) {
   }
 }
 
+async function runWithConcurrency(items, limit, worker) {
+  const queue = [...items]
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, queue.length)) }, async () => {
+    while (queue.length) {
+      const item = queue.shift()
+      if (!item) break
+      await worker(item)
+    }
+  })
+  await Promise.all(workers)
+}
+
 async function enrichRows(rows) {
-  const missing = rows.filter((r) => (!r.poster || !r.imdbId) && r.url).slice(0, 120)
-  for (const row of missing) {
+  const candidates = rows.filter((r) => (!r.poster || !r.imdbId) && r.url).slice(0, 90)
+
+  await runWithConcurrency(candidates, DETAIL_CONCURRENCY, async (row) => {
     const hint = await fetchDetailHints(row.url)
     if (!row.poster && isPosterUrl(hint.poster)) row.poster = hint.poster
     if (!row.description && hint.description) row.description = hint.description
     if ((!row.name || row.name.length < 2) && hint.name) row.name = hint.name
     if (!row.imdbId && hint.imdbId) row.imdbId = hint.imdbId
-  }
+  })
 }
 
-function rowMatchesType(targetType, row) {
-  const url = String(row.url || '').toLowerCase()
-  if (targetType === 'movie') return url.includes('/adatlap/film/') && !url.includes('/adatlap/sorozat/')
-  if (targetType === 'series') return url.includes('/adatlap/sorozat/')
-  return true
+function uniqueRows(rows) {
+  const map = new Map()
+  for (const row of rows) {
+    const key = canonicalizeUrl(row.url) || `${row.name}:${row.poster || ''}`
+    if (!map.has(key)) {
+      map.set(key, row)
+      continue
+    }
+
+    const prev = map.get(key)
+    map.set(key, {
+      ...prev,
+      poster: prev.poster || row.poster,
+      description: prev.description || row.description,
+      releaseInfo: prev.releaseInfo || row.releaseInfo,
+      imdbId: prev.imdbId || row.imdbId,
+      name: prev.name.length >= row.name.length ? prev.name : row.name
+    })
+  }
+
+  return [...map.values()]
 }
 
 async function fetchOneCatalogPage(url) {
+  const now = Date.now()
+  const cached = PAGE_CACHE.get(url)
+  if (cached && cached.expiresAt > now) return cached.rows
+
   const { data } = await http.get(url)
   const $ = cheerio.load(data)
-  const jsonLdItems = parseJsonLdBlocks($, url)
-  const domItems = parseDomCards($, url)
-  return [...jsonLdItems, ...domItems]
+  const rows = [...parseJsonLdBlocks($, url), ...parseDomCards($, url)]
+
+  PAGE_CACHE.set(url, { rows, expiresAt: now + PAGE_CACHE_TTL_MS })
+  return rows
+}
+
+function catalogCacheKey({ type, genre, skip, limit }) {
+  return `${type}|${genre || ''}|${skip}|${limit}`
 }
 
 async function fetchCatalog({ type, genre, skip = 0, limit = 50 }) {
+  const key = catalogCacheKey({ type, genre, skip, limit })
+  const now = Date.now()
+  const cached = CATALOG_CACHE.get(key)
+  if (cached && cached.expiresAt > now) return cached.payload
+
   const urls = CATALOG_URLS[type] || CATALOG_URLS.movie
-  const rows = []
   const errors = []
 
-  for (const url of urls) {
-    try {
-      const part = await fetchOneCatalogPage(url)
-      rows.push(...part)
-    } catch (error) {
-      errors.push(`${url}: ${error.message}`)
-    }
-  }
+  const settled = await Promise.allSettled(urls.map((url) => fetchOneCatalogPage(url)))
+  const rows = []
+  settled.forEach((result, idx) => {
+    if (result.status === 'fulfilled') rows.push(...result.value)
+    else errors.push(`${urls[idx]}: ${result.reason?.message || 'fetch failed'}`)
+  })
 
-  await enrichRows(rows)
-
-  const typedRows = rows.filter((r) => rowMatchesType(type, r))
+  const typedRows = uniqueRows(rows).filter((r) => rowMatchesType(type, r))
+  await enrichRows(typedRows)
 
   const metas = dedupeMetas(typedRows.map((r) => toMeta(type, r)).filter(Boolean))
     .filter((meta) => {
@@ -329,11 +377,9 @@ async function fetchCatalog({ type, genre, skip = 0, limit = 50 }) {
     })
     .slice(skip, skip + limit)
 
-  for (const meta of metas) {
-    META_CACHE.set(meta.id, meta)
-  }
+  metas.forEach((meta) => META_CACHE.set(meta.id, meta))
 
-  return {
+  const payload = {
     source: SOURCE_NAME,
     type,
     genre,
@@ -342,6 +388,9 @@ async function fetchCatalog({ type, genre, skip = 0, limit = 50 }) {
     metas,
     warnings: errors.length ? errors : undefined
   }
+
+  CATALOG_CACHE.set(key, { payload, expiresAt: now + CATALOG_CACHE_TTL_MS })
+  return payload
 }
 
 async function fetchMeta({ type, id }) {
