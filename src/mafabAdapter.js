@@ -3,15 +3,15 @@ const cheerio = require('cheerio')
 
 const SOURCE_NAME = 'mafab.hu'
 const CATALOG_SOURCES = {
-  'mafab-movies': ['https://mafab.hu/filmek/filmek/'],
-  'mafab-series': ['https://mafab.hu/sorozatok/sorozatok/'],
-  'mafab-streaming': ['https://mafab.hu/vod/top-streaming'],
-  'mafab-cinema': ['https://mafab.hu/cinema/premier/jelenleg-a-mozikban'],
+  'mafab-movies': ['https://www.mafab.hu/filmek/filmek/'],
+  'mafab-series': ['https://www.mafab.hu/sorozatok/sorozatok/'],
+  'mafab-streaming': ['https://www.mafab.hu/vod/top-streaming'],
+  'mafab-cinema': ['https://www.mafab.hu/cinema/premier/jelenleg-a-mozikban'],
   'hu-mixed': [
-    'https://mafab.hu/filmek/filmek/',
-    'https://mafab.hu/sorozatok/sorozatok/',
-    'https://mafab.hu/vod/top-streaming',
-    'https://mafab.hu/cinema/premier/jelenleg-a-mozikban'
+    'https://www.mafab.hu/filmek/filmek/',
+    'https://www.mafab.hu/sorozatok/sorozatok/',
+    'https://www.mafab.hu/vod/top-streaming',
+    'https://www.mafab.hu/cinema/premier/jelenleg-a-mozikban'
   ]
 }
 
@@ -113,7 +113,16 @@ function toMeta(row) {
 async function fetchCatalog({ catalogId = 'hu-mixed', genre, skip = 0, limit = 50 }) {
   if (catalogId.startsWith('porthu-')) return { source: SOURCE_NAME, metas: [] }
   const urls = CATALOG_SOURCES[catalogId] || SOURCE_URLS
-  const settled = await Promise.allSettled(urls.map((u) => http.get(u)))
+  const settled = await Promise.allSettled(urls.map(async (u) => {
+    try {
+      return await http.get(u)
+    } catch (error) {
+      if (/redirects exceeded/i.test(String(error?.message || '')) && !u.includes('://www.')) {
+        return http.get(u.replace('://mafab.hu/', '://www.mafab.hu/'))
+      }
+      throw error
+    }
+  }))
   const rows = []
   const warnings = []
 
@@ -166,5 +175,8 @@ module.exports = {
   fetchCatalog,
   fetchMeta,
   fetchStreams,
-  SOURCE_NAME
+  SOURCE_NAME,
+  _internals: {
+    CATALOG_SOURCES
+  }
 }
