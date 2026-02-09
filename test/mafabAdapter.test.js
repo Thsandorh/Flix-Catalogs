@@ -1,5 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const cheerio = require('cheerio')
 
 const { _internals } = require('../src/mafabAdapter')
 
@@ -11,4 +12,29 @@ test('mafab catalog source URLs always use www host to avoid redirect loops', ()
       assert.match(url, /^https:\/\/www\.mafab\.hu\//)
     }
   }
+})
+
+test('parsePage extracts poster from lazy background image data-src', () => {
+  const html = `
+    <div class="item">
+      <div class="image lazyNbg" data-src="/static/thumb/w150/profiles/2016/66/20/2551.jpg" style="background-image:url();"></div>
+      <div class="title"><a href="/movies/a-keresztapa-2551.html" title="A keresztapa">A keresztapa</a></div>
+    </div>
+  `
+
+  const rows = _internals.parsePage(html, 'https://www.mafab.hu/filmek/filmek/')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].poster, 'https://www.mafab.hu/static/thumb/w500/profiles/2016/66/20/2551.jpg')
+})
+
+test('extractPosterFromRoot prefers larger srcset candidate', () => {
+  const $ = cheerio.load(`
+    <div class="item">
+      <img data-srcset="/static/thumb/w150/profiles/a.jpg 150w, /static/thumb/w500/profiles/a.jpg 500w" />
+      <a href="/movies/test-1.html">Test</a>
+    </div>
+  `)
+
+  const poster = _internals.extractPosterFromRoot($, $('.item').first(), 'https://www.mafab.hu/filmek/filmek/')
+  assert.equal(poster, 'https://www.mafab.hu/static/thumb/w500/profiles/a.jpg')
 })

@@ -43,6 +43,61 @@ function absolutize(base, href) {
   }
 }
 
+function extractUrlFromStyle(styleValue) {
+  const m = String(styleValue || '').match(/background-image\s*:\s*url\((['"]?)([^)'"\s]+)\1\)/i)
+  return m ? m[2] : null
+}
+
+function pickBestSrcFromSrcset(srcset) {
+  const candidates = String(srcset || '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const [url, size = '0w'] = part.split(/\s+/)
+      const score = Number(String(size).replace(/[^0-9]/g, '')) || 0
+      return { url, score }
+    })
+    .sort((a, b) => b.score - a.score)
+  return candidates[0]?.url || null
+}
+
+function upscalePosterUrl(posterUrl) {
+  const url = String(posterUrl || '')
+  if (!url) return null
+  return url.replace(/\/static\/thumb\/w\d+\//i, '/static/thumb/w500/')
+}
+
+function extractPosterFromRoot($, root, pageUrl) {
+  const candidates = []
+
+  root.find('img').each((_, img) => {
+    const el = $(img)
+    candidates.push(el.attr('data-original'))
+    candidates.push(el.attr('data-src'))
+    candidates.push(pickBestSrcFromSrcset(el.attr('data-srcset')))
+    candidates.push(el.attr('src'))
+    candidates.push(pickBestSrcFromSrcset(el.attr('srcset')))
+  })
+
+  root.find('[data-src]').each((_, el) => candidates.push($(el).attr('data-src')))
+  root.find('[style*="background-image"]').each((_, el) => candidates.push(extractUrlFromStyle($(el).attr('style'))))
+
+  const resolved = candidates
+    .map((v) => absolutize(pageUrl, v))
+    .filter(Boolean)
+    .filter((v) => /\.(jpe?g|png|webp)(\?|$)/i.test(v))
+    .filter((v) => !/logo|icon|sprite|ajax-loader/i.test(v))
+
+  const prioritized = resolved.sort((a, b) => {
+    const sa = /\/static\/thumb\/|\/profiles\//i.test(a) ? 1 : 0
+    const sb = /\/static\/thumb\/|\/profiles\//i.test(b) ? 1 : 0
+    return sb - sa
+  })
+
+  return upscalePosterUrl(prioritized[0] || null)
+}
+
 function extractImdbId(value) {
   const m = String(value || '').match(/tt[0-9]{5,10}/i)
   return m ? m[0].toLowerCase() : null
@@ -64,14 +119,14 @@ function parsePage(html, url) {
     const detail = absolutize(url, href)
     if (!detail) return
 
-    const root = $(el).closest('article, .card, .item, .movie-box, li, div')
+    const root = $(el).closest('.item, article, .card, .movie-box, li, div')
+    const itemRoot = root.closest('.item').length ? root.closest('.item') : root
     const title = sanitizeText(
-      $(el).attr('title') || $(el).attr('aria-label') || root.find('h1,h2,h3,h4,.title').first().text() || $(el).text()
+      $(el).attr('title') || $(el).attr('aria-label') || itemRoot.find('h1,h2,h3,h4,.title').first().text() || $(el).text()
     )
     if (!title || title.length < 2) return
 
-    const img = root.find('img').first()
-    const poster = absolutize(url, img.attr('src') || img.attr('data-src') || img.attr('data-original'))
+    const poster = extractPosterFromRoot($, itemRoot, url)
 
     rows.push({
       name: title,
@@ -136,6 +191,11 @@ async function fetchCatalog({ catalogId = 'hu-mixed', genre, skip = 0, limit = 5
   }
 
   let metas = dedupe(rows).map(toMeta)
+  metas = metas.sort((a, b) => {
+    const ap = a.poster ? 1 : 0
+    const bp = b.poster ? 1 : 0
+    return bp - ap
+  })
   if (genre) {
     const g = genre.toLowerCase()
     metas = metas.filter((m) => (m.description || '').toLowerCase().includes(g) || (m.name || '').toLowerCase().includes(g))
@@ -177,6 +237,9 @@ module.exports = {
   fetchStreams,
   SOURCE_NAME,
   _internals: {
-    CATALOG_SOURCES
+    CATALOG_SOURCES,
+    extractPosterFromRoot,
+    upscalePosterUrl,
+    parsePage
   }
 }
