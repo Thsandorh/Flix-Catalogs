@@ -369,13 +369,15 @@ async function fetchCatalog({ type, genre, skip = 0, limit = 50 }) {
   const typedRows = uniqueRows(rows).filter((r) => rowMatchesType(type, r))
   await enrichRows(typedRows)
 
-  const metas = dedupeMetas(typedRows.map((r) => toMeta(type, r)).filter(Boolean))
-    .filter((meta) => {
-      if (!genre) return true
-      const genreNeedle = genre.toLowerCase()
-      return (meta.genres || []).some((g) => g.toLowerCase().includes(genreNeedle))
-    })
-    .slice(skip, skip + limit)
+  const filtered = dedupeMetas(typedRows.map((r) => toMeta(type, r)).filter(Boolean)).filter((meta) => {
+    if (!genre) return true
+    const genreNeedle = genre.toLowerCase()
+    return (meta.genres || []).some((g) => g.toLowerCase().includes(genreNeedle))
+  })
+
+  const withPoster = filtered.filter((m) => Boolean(m.poster))
+  const withoutPoster = filtered.filter((m) => !m.poster)
+  const metas = [...withPoster, ...withoutPoster].slice(skip, skip + limit)
 
   metas.forEach((meta) => META_CACHE.set(meta.id, meta))
 
