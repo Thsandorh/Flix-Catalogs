@@ -1,11 +1,22 @@
-const { fetchCatalog, fetchMeta, fetchStreams } = require('../src/porthuAdapter')
-const { manifest } = require('../src/manifest')
+const { createManifest } = require('../src/manifest')
+const { defaultConfig, normalizeConfig, encodeConfig, decodeConfig, tryDecodeConfig } = require('../src/config')
+const {
+  fetchCatalogFromSources,
+  fetchMetaFromSources,
+  fetchStreamsFromSources
+} = require('../src/sourceRouter')
 
 function sendJson(res, statusCode, payload, cacheControl) {
   res.statusCode = statusCode
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   if (cacheControl) res.setHeader('Cache-Control', cacheControl)
   res.end(JSON.stringify(payload))
+}
+
+function sendHtml(res, statusCode, html) {
+  res.statusCode = statusCode
+  res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.end(html)
 }
 
 function parseExtraString(extraStr) {
@@ -24,77 +35,154 @@ function parseExtraFromQuery(searchParams) {
   return extra
 }
 
-function isValidCatalog(type, id) {
-  return type === 'movie' && id === 'porthu-mixed'
+function isConfigToken(segment) {
+  const reserved = new Set(['configure', 'manifest.json', 'catalog', 'meta', 'stream'])
+  if (!segment || reserved.has(segment)) return false
+  if (!/^[A-Za-z0-9_-]{8,}$/.test(segment)) return false
+  return Boolean(tryDecodeConfig(segment))
 }
 
-async function handleCatalog(type, id, extra, res) {
-  if (!isValidCatalog(type, id)) return sendJson(res, 200, { metas: [] })
+function parseRequestContext(pathname) {
+  const segments = pathname.split('/').filter(Boolean)
+  let token = null
+  let rest = segments
 
-  const limit = Math.min(Number(process.env.CATALOG_LIMIT || 50), 100)
-  const skip = Math.max(Number(extra.skip || 0), 0)
-
-  try {
-    const result = await fetchCatalog({ genre: extra.genre, skip, limit })
-    return sendJson(res, 200, { metas: result.metas }, 'public, s-maxage=300, stale-while-revalidate=600')
-  } catch (error) {
-    console.error(`catalog fetch failed: ${error.message}`)
-    return sendJson(res, 200, { metas: [] }, 'public, max-age=60')
+  if (segments.length && isConfigToken(segments[0])) {
+    token = segments[0]
+    rest = segments.slice(1)
   }
+
+  return { token, rest }
 }
 
-async function handleMeta(id, res) {
-  try {
-    const result = await fetchMeta({ id })
-    return sendJson(res, 200, { meta: result.meta || null }, 'public, max-age=300')
-  } catch (error) {
-    console.error(`meta fetch failed: ${error.message}`)
-    return sendJson(res, 200, { meta: null }, 'public, max-age=60')
-  }
+function getRequestOrigin(req) {
+  const protoHeader = (req.headers && req.headers['x-forwarded-proto']) || ''
+  const hostHeader = (req.headers && req.headers['x-forwarded-host']) || (req.headers && req.headers.host) || ''
+
+  const host = String(hostHeader).split(',')[0].trim()
+  const inferredProtocol = host.startsWith('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https'
+  const protocol = String(protoHeader).split(',')[0].trim() || inferredProtocol
+
+  if (!host) return 'http://localhost'
+  return `${protocol}://${host}`
 }
 
-async function handleStream(id, res) {
-  try {
-    const result = await fetchStreams({ id })
-    return sendJson(res, 200, { streams: result.streams || [] }, 'public, max-age=300')
-  } catch (error) {
-    console.error(`stream fetch failed: ${error.message}`)
-    return sendJson(res, 200, { streams: [] }, 'public, max-age=60')
-  }
+function renderConfigureHtml(origin, config) {
+  const token = encodeConfig(config)
+  const manifestUrl = `${origin}/${token}/manifest.json`
+  const stremioUrl = `stremio://${manifestUrl}`
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Configure HU Catalog Addon</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; background:#0b1020; color:#e8ecff; margin:0; }
+    .wrap { max-width:760px; margin:40px auto; padding:24px; background:#121a35; border-radius:14px; }
+    h1 { margin-top:0; }
+    .card { background:#0f1530; border:1px solid #25305f; padding:16px; border-radius:10px; margin:10px 0; }
+    label { display:flex; gap:10px; align-items:center; font-size:18px; }
+    .actions { display:flex; gap:12px; flex-wrap:wrap; margin-top:18px; }
+    button, a.btn { border:0; background:#5b7cff; color:white; padding:12px 16px; border-radius:10px; cursor:pointer; text-decoration:none; font-weight:600; }
+    .ghost { background:#25305f; }
+    code { display:block; background:#0a1028; padding:10px; border-radius:8px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Configure HU Movies & Series Addon</h1>
+    <p>Select sources. By default only <b>Mafab.hu</b> is enabled.</p>
+
+    <form id="cfgForm">
+      <div class="card"><label><input type="checkbox" id="src_mafab" ${config.sources.mafab ? 'checked' : ''}> Mafab.hu</label></div>
+      <div class="card"><label><input type="checkbox" id="src_porthu" ${config.sources.porthu ? 'checked' : ''}> Port.hu</label></div>
+
+      <div class="actions">
+        <button type="submit">Generate links</button>
+        <a class="btn" id="installBtn" href="${stremioUrl}">Install in Stremio</a>
+      </div>
+    </form>
+
+    <h3>Manifest URL</h3>
+    <code id="manifestUrl">${manifestUrl}</code>
+  </div>
+
+<script>
+  const form = document.getElementById('cfgForm')
+  const installBtn = document.getElementById('installBtn')
+  const manifestEl = document.getElementById('manifestUrl')
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault()
+    const cfg = {
+      sources: {
+        mafab: document.getElementById('src_mafab').checked,
+        porthu: document.getElementById('src_porthu').checked
+      }
+    }
+
+    const token = btoa(JSON.stringify(cfg)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')
+    const manifest = location.origin + '/' + token + '/manifest.json'
+    manifestEl.textContent = manifest
+    installBtn.href = 'stremio://' + manifest
+  })
+</script>
+</body>
+</html>`
 }
 
 module.exports = async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost')
-    const path = url.pathname
+    const { token, rest } = parseRequestContext(url.pathname)
+    const config = normalizeConfig(decodeConfig(token) || defaultConfig())
+    const manifest = createManifest(config)
 
-    if (path === '/' || path === '/manifest.json') {
+    if (url.pathname === '/') {
+      res.statusCode = 302
+      res.setHeader('Location', '/configure')
+      return res.end('Redirecting to /configure')
+    }
+
+    if (rest.length === 1 && rest[0] === 'configure' && !token) {
+      return sendHtml(res, 200, renderConfigureHtml(getRequestOrigin(req), config))
+    }
+
+    if (rest.length === 1 && rest[0] === 'manifest.json') {
       return sendJson(res, 200, manifest, 'public, max-age=300')
     }
 
-    const withExtra = path.match(/^\/catalog\/([^/]+)\/([^/]+)\/(.+)\.json$/)
-    if (withExtra) {
-      const [, type, id, extraEncoded] = withExtra
-      const extra = { ...parseExtraString(extraEncoded), ...parseExtraFromQuery(url.searchParams) }
-      return handleCatalog(type, id, extra, res)
+    if (rest[0] === 'catalog') {
+      const [, type, id, maybeExtra] = rest
+      const extraPath = maybeExtra && maybeExtra.endsWith('.json') ? maybeExtra.slice(0, -5) : null
+      const noExtra = id && id.endsWith('.json')
+      const catalogId = noExtra ? id.slice(0, -5) : id
+
+      if (type !== 'movie' || catalogId !== 'hu-mixed') return sendJson(res, 200, { metas: [] })
+
+      const extra = {
+        ...(extraPath ? parseExtraString(extraPath) : {}),
+        ...parseExtraFromQuery(url.searchParams)
+      }
+
+      const limit = Math.min(Number(process.env.CATALOG_LIMIT || 50), 100)
+      const skip = Math.max(Number(extra.skip || 0), 0)
+      const { metas } = await fetchCatalogFromSources(config, { genre: extra.genre, skip, limit })
+      return sendJson(res, 200, { metas }, 'public, s-maxage=300, stale-while-revalidate=600')
     }
 
-    const withoutExtra = path.match(/^\/catalog\/([^/]+)\/([^/]+)\.json$/)
-    if (withoutExtra) {
-      const [, type, id] = withoutExtra
-      return handleCatalog(type, id, parseExtraFromQuery(url.searchParams), res)
+    if (rest[0] === 'meta' && rest.length >= 3) {
+      const id = decodeURIComponent((rest[2] || '').replace(/\.json$/, ''))
+      const { meta } = await fetchMetaFromSources(config, { id })
+      return sendJson(res, 200, { meta: meta || null }, 'public, max-age=300')
     }
 
-    const metaMatch = path.match(/^\/meta\/([^/]+)\/(.+)\.json$/)
-    if (metaMatch) {
-      const [, , id] = metaMatch
-      return handleMeta(decodeURIComponent(id), res)
-    }
-
-    const streamMatch = path.match(/^\/stream\/([^/]+)\/(.+)\.json$/)
-    if (streamMatch) {
-      const [, , id] = streamMatch
-      return handleStream(decodeURIComponent(id), res)
+    if (rest[0] === 'stream' && rest.length >= 3) {
+      const id = decodeURIComponent((rest[2] || '').replace(/\.json$/, ''))
+      const out = await fetchStreamsFromSources(config, { id })
+      return sendJson(res, 200, { streams: out.streams || [] }, 'public, max-age=300')
     }
 
     return sendJson(res, 404, { error: 'Not found' })
@@ -105,3 +193,5 @@ module.exports = async (req, res) => {
     })
   }
 }
+
+module.exports._internals = { getRequestOrigin }

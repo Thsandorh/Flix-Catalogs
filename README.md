@@ -1,78 +1,88 @@
-# Port.hu Stremio Catalog Addon
+# HU Movies & Series Stremio Addon (Port.hu + Mafab.hu)
 
-A Stremio catalog addon that pulls movie and series metadata from Port.hu and exposes it through the Stremio addon API.
+Configurable Stremio addon with a professional configure page and source selection.
 
-## Features
+## What is implemented
 
-- Single mixed catalog (`porthu-mixed`) containing both movies and series
-- Port.hu data is treated as a single mixed feed (no strict movie/series separation by source URL).
-- Multiple extraction strategies for source resilience:
-  - JSON-LD parsing (`Movie`, `TVSeries`, `ItemList`)
-  - DOM card-style parsing fallback
-- IMDb-backed IDs when discoverable (better cross-addon stream compatibility)
-- Stable deterministic fallback IDs
-- Deduplication and optional genre filtering
-- Vercel-compatible API route included
-- Supports both Stremio catalog URL variants:
-  - `/catalog/:type/:id.json`
-  - `/catalog/:type/:id/:extra.json`
+- Homepage redirects to `/configure`
+- Configure UI with source checkboxes:
+  - ✅ Mafab.hu (default enabled)
+  - ⬜ Port.hu (default disabled)
+- "Install in Stremio" button generating config-specific manifest URL
+- On Vercel deployment, configure page links are generated from forwarded host/proto headers (no localhost URLs).
+- One mixed catalog: `Film és sorozat` (`hu-mixed`)
+- `catalog`, `meta`, and `stream` resources
+- Source adapters:
+  - `src/mafabAdapter.js`
+  - `src/porthuAdapter.js`
 
-## Endpoints
+## Mafab catalog strategy (recommended and used as base feed)
 
-- `GET /manifest.json`
-- `GET /catalog/:type/:id.json`
-- `GET /catalog/:type/:id/:extra.json`
-- `GET /meta/:type/:id.json`
-- `GET /stream/:type/:id.json`
+Mafab endpoints currently used for the mixed feed:
 
-Examples:
+- `/filmek/filmek/`
+- `/sorozatok/sorozatok/`
+- `/vod/top-streaming`
+- `/cinema/premier/jelenleg-a-mozikban`
 
-- `/catalog/movie/porthu-mixed.json`
-- `/catalog/movie/porthu-mixed/skip=0.json`
-- `/catalog/movie/porthu-mixed/genre=drama&skip=0.json`
+These map well to practical categories:
 
-## Local development
+1. Movies (main list)
+2. Series (main list)
+3. Top streaming
+4. In cinemas now
+
+## Local run
 
 ```bash
 npm install
 npm run check
-npm test
 npm start
 ```
 
-Then open: `http://127.0.0.1:7000/manifest.json`
+Open:
 
-## Deploy to Vercel
+- Configure page: `http://127.0.0.1:7000/configure`
+- Manifest (default config): `http://127.0.0.1:7000/manifest.json`
 
-This repository includes:
+## Development checks
 
-- `api/index.js` serverless entrypoint
-- `vercel.json` route mapping
+Before running tests, install dependencies:
 
-Deploy with Vercel CLI or Git integration.
+```bash
+npm ci
+```
+
+Run static syntax checks and test suite:
+
+```bash
+npm run check
+npm test
+```
+
+If your GitHub PR page shows a prolonged "Checking for the ability to merge automatically…" state, refresh the page after the checks complete and verify there are no required status checks configured for your branch protection rules.
+
+## Configured manifest URL format
+
+`http://host/<base64url-config>/manifest.json`
+
+Example config object:
+
+```json
+{
+  "sources": {
+    "mafab": true,
+    "porthu": false
+  }
+}
+```
 
 ## Environment variables
 
-- `PORT` (local server, default: `7000`)
-- `CATALOG_LIMIT` (max returned items per request, default: `50`, hard cap: `100`)
-- `PORT_HU_HTTP_TIMEOUT_MS` (source request timeout, default: `12000`)
-- `PORT_HU_PAGE_CACHE_TTL_MS` (parsed source-page cache TTL, default: `600000`)
-- `PORT_HU_CATALOG_CACHE_TTL_MS` (catalog response cache TTL, default: `300000`)
-- `PORT_HU_DETAIL_CONCURRENCY` (detail enrichment concurrency, default: `8`)
-
-## Notes
-
-- Source HTML structure may change over time; update selectors in `parseDomCards` when needed.
-- Respect source terms of use and robots policy before production use.
-- See `docs/porthu-analysis.md` for live Playwright findings.
-
-
-## Error handling behavior
-
-- Catalog endpoint now returns `200` with an empty `metas` array when upstream parsing/fetch fails, preventing Stremio UI hard errors on transient source failures.
-
-
-- Provides an external stream item that opens the title on Port.hu when playback is requested.
-
-
-- Uses strict type separation (`/adatlap/film/` vs `/adatlap/sorozat/` + episode detection) to prevent movie/series mixing.
+- `PORT` (default: `7000`)
+- `CATALOG_LIMIT` (default: `50`, max: `100`)
+- `PORT_HU_HTTP_TIMEOUT_MS` (default: `12000`)
+- `PORT_HU_PAGE_CACHE_TTL_MS` (default: `600000`)
+- `PORT_HU_CATALOG_CACHE_TTL_MS` (default: `300000`)
+- `PORT_HU_DETAIL_CONCURRENCY` (default: `8`)
+- `MAFAB_HTTP_TIMEOUT_MS` (default: `12000`)
