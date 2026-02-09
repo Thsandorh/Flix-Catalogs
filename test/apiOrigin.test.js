@@ -33,3 +33,32 @@ test('configure html stremio link does not include nested https protocol', () =>
   assert.match(html, /stremio:\/\/porthu-addon\.vercel\.app\//)
   assert.doesNotMatch(html, /stremio:\/\/https:\/\//)
 })
+
+test('tokenized manifest endpoint returns catalogs without server error', async () => {
+  const token = encodeConfig({ sources: { mafab: true, porthu: false } })
+  const req = {
+    url: `/${token}/manifest.json`,
+    headers: { host: 'localhost:7000' }
+  }
+
+  let body = ''
+  const headers = {}
+  const res = {
+    statusCode: 0,
+    setHeader(name, value) {
+      headers[name.toLowerCase()] = value
+    },
+    end(chunk = '') {
+      body += chunk
+    }
+  }
+
+  await apiHandler(req, res)
+
+  assert.equal(res.statusCode, 200)
+  assert.match(headers['content-type'], /application\/json/)
+
+  const payload = JSON.parse(body)
+  assert.ok(Array.isArray(payload.catalogs))
+  assert.ok(payload.catalogs.length > 0)
+})
