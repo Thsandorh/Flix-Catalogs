@@ -75,22 +75,6 @@ function getRequestOrigin(req) {
 }
 
 function renderConfigureHtml(origin, config) {
-  const mafabCatalogLabels = {
-    'mafab-movies': 'Mafab: Filmek',
-    'mafab-series': 'Mafab: Sorozatok',
-    'mafab-streaming': 'Mafab: Top streaming',
-    'mafab-cinema': 'Mafab: Moziban most',
-    'mafab-cinema-soon': 'Mafab: Hamarosan a moziban',
-    'mafab-tv': 'Mafab: TV kínálat',
-    'mafab-movies-lists': 'Mafab: Filmes listák',
-    'mafab-series-lists': 'Mafab: Sorozat listák',
-    'mafab-streaming-premieres': 'Mafab: Streaming premierek'
-  }
-  const mafabCatalogCheckboxes = MAFAB_CATALOG_IDS.map(
-    (id) =>
-      `<div class="card"><label><input type="checkbox" class="mafab-cat" data-id="${id}" ${config.mafabCatalogs?.[id] !== false ? 'checked' : ''}> ${mafabCatalogLabels[id] || id}</label></div>`
-  ).join('')
-
   const token = encodeConfig(config)
   const manifestUrl = `${origin}/${token}/manifest.json`
   const stremioManifest = manifestUrl.replace(/^https?:\/\//, '')
