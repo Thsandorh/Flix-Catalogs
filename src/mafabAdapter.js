@@ -26,9 +26,13 @@ const CATALOG_SOURCES = {
 }
 
 const SOURCE_URLS = CATALOG_SOURCES['hu-mixed']
+const AUTOCOMPLETE_ENDPOINT = 'https://www.mafab.hu/js/autocomplete.php'
+const TMDB_BASE_URL = 'https://api.themoviedb.org/3'
+const DEFAULT_TMDB_API_KEY = 'ffe7ef8916c61835264d2df68276ddc2'
 
 const META_CACHE = new Map()
-const DETAIL_HINTS_CACHE = new Map()
+const AUTOCOMPLETE_CACHE = new Map()
+const TMDB_CACHE = new Map()
 
 const http = axios.create({
   timeout: Number(process.env.MAFAB_HTTP_TIMEOUT_MS || 12000),
@@ -51,14 +55,78 @@ function normalizeTitle(value) {
   return text
     .replace(/^\d{1,3}\s+(?=\p{L}|\d)/u, '')
     .replace(/^\d{1,3}%\s+(?=\p{L}|\d)/u, '')
+    .replace(/^(?:n\/?a|na)\s+(?=\p{L}|\d)/iu, '')
+    .replace(/\s*\((19\d{2}|20\d{2})\)\s*$/u, '')
     .trim()
 }
 
-function hasUsefulDescription(value) {
-  const text = sanitizeText(value)
-  if (!text) return false
-  if (text.length < 40) return false
-  return /\p{L}{3,}/u.test(text)
+function normalizeLookupTitle(value) {
+  return normalizeTitle(value)
+    .replace(/\.\.\.$/, '')
+    .replace(/^(?:ismeretlen|unknown)\b[\s:.-]*/iu, '')
+    .trim()
+}
+
+function titleFromDetailUrl(url) {
+  const match = String(url || '').match(/\/movies\/([^/?#]+?)(?:-\d+)?\.html/i)
+  if (!match) return ''
+  const words = sanitizeText(match[1].replace(/[-_]+/g, ' ')).split(' ')
+  return words
+    .map((word) => (word ? word[0].toUpperCase() + word.slice(1) : word))
+    .join(' ')
+}
+
+function hasUsefulTitle(value) {
+  const title = normalizeLookupTitle(value)
+  if (!title || title.length < 2) return false
+  if (/^(?:ismeretlen|unknown)$/iu.test(title)) return false
+  return /\p{L}{2,}/u.test(title)
+}
+
+function uniqueNonEmpty(values) {
+  return [...new Set((values || []).map((v) => sanitizeText(v)).filter(Boolean))]
+}
+
+function pickBestMatch(matches) {
+  const items = (matches || []).filter(Boolean)
+  if (!items.length) return null
+  items.sort((a, b) => b.score - a.score)
+  return items[0]
+}
+
+async function findBestAutocompleteAcrossQueries(queries, row) {
+  const candidates = []
+  for (const query of uniqueNonEmpty(queries)) {
+    const items = await searchAutocomplete(query)
+    const best = findBestAutocompleteMatch(items, row)
+    if (best) candidates.push(best)
+  }
+  return pickBestMatch(candidates)
+}
+
+function normalizeForMatch(value) {
+  return sanitizeText(value)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+}
+
+function stripHtml(value) {
+  return sanitizeText(String(value || '').replace(/<[^>]+>/g, ' '))
+}
+
+function extractYear(value) {
+  const match = String(value || '').match(/(?:\(|\b)(19\d{2}|20\d{2})(?:\)|\b)/)
+  return match ? Number(match[1]) : null
+}
+
+function parseAutocompleteLabel(label) {
+  const clean = stripHtml(label)
+  const year = extractYear(clean)
+  const title = sanitizeText(clean.replace(/\s*[\[(](19\d{2}|20\d{2})[\])].*$/, '').replace(/\s+-\s+.*$/, ''))
+  return { title: title || clean, year }
 }
 
 function absolutize(base, href) {
@@ -75,74 +143,106 @@ function extractImdbId(value) {
   return m ? m[0].toLowerCase() : null
 }
 
-function parseDetailHints(html, pageUrl) {
-  const $ = cheerio.load(html)
-  const ogDescription =
-    $('meta[property="og:description"]').attr('content') ||
-    $('meta[name="description"]').attr('content') ||
-    null
-  const ogTitle = $('meta[property="og:title"]').attr('content') || $('title').text() || null
-  const imdbLink =
-    $('a[href*="imdb.com/title/"]').first().attr('href') ||
-    String(html || '').match(/imdb\.com\/title\/(tt[0-9]{5,10})/i)?.[0] ||
-    null
+function toDetailSlug(url) {
+  const match = String(url || '').match(/\/movies\/([^/?#]+\.html)/i)
+  return match ? match[1].toLowerCase() : ''
+}
 
-  return {
-    description: sanitizeText(ogDescription),
-    name: sanitizeText(ogTitle),
-    imdbId: extractImdbId(imdbLink || html)
+function findBestAutocompleteMatch(items, row) {
+  const entries = Array.isArray(items) ? items : []
+  if (!entries.length) return null
+
+  const rowTitleNorm = normalizeForMatch(row?.name)
+  const rowSlug = toDetailSlug(row?.url)
+
+  const scored = entries
+    .map((item) => {
+      const url = absolutize('https://www.mafab.hu', item?.url || item?.value || item?.link)
+      const parsed = parseAutocompleteLabel(item?.label || item?.name || item?.title || '')
+      const titleNorm = normalizeForMatch(parsed.title)
+      const slug = toDetailSlug(url)
+      const year = parsed.year || extractYear(item?.year)
+
+      let score = 0
+      if (url && rowSlug && slug && slug === rowSlug) score += 200
+      if (titleNorm && rowTitleNorm && titleNorm === rowTitleNorm) score += 120
+      if (titleNorm && rowTitleNorm && (titleNorm.includes(rowTitleNorm) || rowTitleNorm.includes(titleNorm))) score += 40
+      if (year && String(row?.releaseInfo || '').includes(String(year))) score += 20
+
+      return { score, url, title: parsed.title, year }
+    })
+    .sort((a, b) => b.score - a.score)
+
+  if (!scored.length || scored[0].score <= 0) return null
+  return scored[0]
+}
+
+function getTmdbApiKey() {
+  return process.env.TMDB_API_KEY || process.env.MAFAB_TMDB_API_KEY || DEFAULT_TMDB_API_KEY
+}
+
+async function searchAutocomplete(rowName) {
+  const term = sanitizeText(rowName)
+  if (!term) return []
+  const cacheKey = term.toLowerCase()
+  if (AUTOCOMPLETE_CACHE.has(cacheKey)) return AUTOCOMPLETE_CACHE.get(cacheKey)
+
+  try {
+    const res = await http.get(AUTOCOMPLETE_ENDPOINT, { params: { term } })
+    const items = Array.isArray(res.data) ? res.data : []
+    AUTOCOMPLETE_CACHE.set(cacheKey, items)
+    return items
+  } catch {
+    AUTOCOMPLETE_CACHE.set(cacheKey, [])
+    return []
   }
 }
 
-async function fetchDetailHints(detailUrl) {
-  if (!detailUrl) return null
-  if (DETAIL_HINTS_CACHE.has(detailUrl)) return DETAIL_HINTS_CACHE.get(detailUrl)
+async function searchTmdbImdbId({ title, year, type }) {
+  const apiKey = getTmdbApiKey()
+  const cleanTitle = normalizeLookupTitle(title)
+  if (!apiKey || !cleanTitle) return null
+
+  const mediaType = type === 'series' ? 'tv' : 'movie'
+  const cacheKey = `${mediaType}:${cleanTitle.toLowerCase()}:${year || ''}`
+  if (TMDB_CACHE.has(cacheKey)) return TMDB_CACHE.get(cacheKey)
+
+  async function searchOnce(yearHint) {
+    const searchPath = mediaType === 'tv' ? '/search/tv' : '/search/movie'
+    const searchParams = {
+      api_key: apiKey,
+      query: cleanTitle,
+      language: 'hu-HU',
+      include_adult: false
+    }
+
+    if (yearHint) {
+      if (mediaType === 'tv') searchParams.first_air_date_year = yearHint
+      else searchParams.year = yearHint
+    }
+
+    const searchRes = await http.get(`${TMDB_BASE_URL}${searchPath}`, { params: searchParams })
+    const candidates = Array.isArray(searchRes.data?.results) ? searchRes.data.results.slice(0, 8) : []
+    for (const candidate of candidates) {
+      const externalIdsPath = mediaType === 'tv' ? `/tv/${candidate.id}/external_ids` : `/movie/${candidate.id}/external_ids`
+      const externalRes = await http.get(`${TMDB_BASE_URL}${externalIdsPath}`, { params: { api_key: apiKey } })
+      const imdbId = extractImdbId(externalRes.data?.imdb_id)
+      if (imdbId) return imdbId
+    }
+    return null
+  }
 
   try {
-    const res = await http.get(detailUrl)
-    const hints = parseDetailHints(res.data, detailUrl)
-    DETAIL_HINTS_CACHE.set(detailUrl, hints)
-    return hints
+    let imdbId = await searchOnce(year || null)
+    if (!imdbId && year) imdbId = await searchOnce(null)
+    TMDB_CACHE.set(cacheKey, imdbId || null)
+    return imdbId || null
   } catch {
-    DETAIL_HINTS_CACHE.set(detailUrl, null)
+    TMDB_CACHE.set(cacheKey, null)
     return null
   }
 }
 
-async function enrichRows(rows, { maxItems = 30, concurrency = 4 } = {}) {
-  const out = [...rows]
-  let idx = 0
-
-  async function worker() {
-    while (idx < out.length) {
-      const current = idx
-      idx += 1
-      if (current >= maxItems) break
-
-      const row = out[current]
-      const shouldEnrich = !row.imdbId || !hasUsefulDescription(row.description)
-      if (!shouldEnrich || !row.url) continue
-
-      const hints = await fetchDetailHints(row.url)
-      if (!hints) continue
-
-      if (!row.imdbId && hints.imdbId) row.imdbId = hints.imdbId
-      if (!hasUsefulDescription(row.description) && hints.description) row.description = hints.description
-      if (hints.name && (!row.name || row.name.length < 2)) row.name = hints.name
-    }
-  }
-
-  const workers = Array.from({ length: Math.max(1, concurrency) }, () => worker())
-  await Promise.allSettled(workers)
-  return out
-}
-
-function toId(url, imdb) {
-  if (imdb) return imdb
-  const m = String(url || '').match(/\/movies\/([^/]+)\.html/i)
-  if (m) return `mafab:${m[1].toLowerCase()}`
-  return `mafab:${Buffer.from(String(url || '')).toString('base64url').slice(0, 24)}`
-}
 
 function parsePage(html, url) {
   const $ = cheerio.load(html)
@@ -155,10 +255,13 @@ function parsePage(html, url) {
 
     const root = $(el).closest('.item, article, .card, .movie-box, li, div')
     const itemRoot = root.closest('.item').length ? root.closest('.item') : root
-    const title = normalizeTitle(
-      $(el).attr('title') || $(el).attr('aria-label') || itemRoot.find('h1,h2,h3,h4,.title').first().text() || $(el).text()
-    )
-    if (!title || title.length < 2) return
+    const rawTitle = $(el).attr('title') || $(el).attr('aria-label') || itemRoot.find('h1,h2,h3,h4,.title').first().text() || $(el).text()
+    let title = normalizeTitle(rawTitle)
+    if (!hasUsefulTitle(title)) {
+      const slugTitle = normalizeTitle(titleFromDetailUrl(detail))
+      if (hasUsefulTitle(slugTitle)) title = slugTitle
+    }
+    if (!hasUsefulTitle(title)) return
 
     rows.push({
       name: title,
@@ -193,14 +296,65 @@ function dedupe(rows) {
   return [...map.values()]
 }
 
+async function enrichRows(rows, { type = 'movie', maxItems = 30, concurrency = 4 } = {}) {
+  const out = [...rows]
+  let idx = 0
+
+  async function worker() {
+    while (idx < out.length) {
+      const current = idx
+      idx += 1
+      if (current >= maxItems) break
+
+      const row = out[current]
+      const slugTitle = normalizeTitle(titleFromDetailUrl(row.url))
+      row.name = normalizeTitle(row.name) || slugTitle
+      if (!hasUsefulTitle(row.name) && hasUsefulTitle(slugTitle)) row.name = slugTitle
+
+      const shouldEnrich = !row.imdbId || !extractYear(row.releaseInfo) || !hasUsefulTitle(row.name)
+      if (!shouldEnrich) continue
+
+      const queryTitles = uniqueNonEmpty([row.name, slugTitle, normalizeLookupTitle(row.name)])
+      const best = await findBestAutocompleteAcrossQueries(queryTitles, row)
+      if (best?.title) row.name = normalizeTitle(best.title)
+      if (best?.year && !extractYear(row.releaseInfo)) row.releaseInfo = String(best.year)
+      if (best?.url) row.url = best.url
+
+      if (!row.imdbId) {
+        const year = extractYear(row.releaseInfo) || best?.year || null
+        const lookupTitles = uniqueNonEmpty([row.name, slugTitle, best?.title])
+        for (const lookupTitle of lookupTitles) {
+          const imdbId = await searchTmdbImdbId({ title: lookupTitle, year, type })
+          if (imdbId) {
+            row.imdbId = imdbId
+            break
+          }
+        }
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.max(1, concurrency) }, () => worker())
+  await Promise.allSettled(workers)
+  return out
+}
+
+function toId(url, imdb) {
+  if (imdb) return imdb
+  const m = String(url || '').match(/\/movies\/([^/]+)\.html/i)
+  if (m) return `mafab:${m[1].toLowerCase()}`
+  return `mafab:${Buffer.from(String(url || '')).toString('base64url').slice(0, 24)}`
+}
+
 function toMeta(row, { type = 'movie' } = {}) {
   const imdbId = row.imdbId || extractImdbId(row.url)
   const id = toId(row.url, imdbId)
   const poster = imdbId ? `https://images.metahub.space/poster/medium/${imdbId}/img` : undefined
+  const displayName = normalizeTitle(row.name) || normalizeTitle(titleFromDetailUrl(row.url)) || 'Ismeretlen cím'
   return {
     id,
     type,
-    name: normalizeTitle(row.name),
+    name: displayName,
     poster,
     description: row.description || undefined,
     releaseInfo: row.releaseInfo || undefined,
@@ -257,18 +411,19 @@ async function fetchCatalog({ type = 'movie', catalogId = 'hu-mixed', genre, ski
     }
   }
 
+  const metaType = catalogId === 'mafab-series' || catalogId === 'mafab-series-lists' || catalogId === 'mafab-tv' || type === 'series' ? 'series' : 'movie'
+
   const enrichedRows = await enrichRows(dedupe(rows), {
+    type: metaType,
     maxItems: Number(process.env.MAFAB_ENRICH_MAX || 200),
     concurrency: Number(process.env.MAFAB_ENRICH_CONCURRENCY || 8)
   })
 
-  const metaType = catalogId === 'mafab-series' || catalogId === 'mafab-series-lists' || catalogId === 'mafab-tv' || type === 'series' ? 'series' : 'movie'
   let metas = enrichedRows.map((row) => toMeta(row, { type: metaType }))
 
   metas = metas.filter((m) => Boolean(m.name))
   metas = dedupeMetasByName(metas)
 
-  // Items with IMDb ID (and thus Cinemeta poster) first
   const withPoster = metas.filter((m) => Boolean(m.poster))
   const withoutPoster = metas.filter((m) => !m.poster)
   metas = [...withPoster, ...withoutPoster]
@@ -324,7 +479,13 @@ module.exports = {
   _internals: {
     CATALOG_SOURCES,
     parsePage,
-    parseDetailHints,
+    parseAutocompleteLabel,
+    findBestAutocompleteMatch,
+    getTmdbApiKey,
+    normalizeTitle,
+    normalizeLookupTitle,
+    titleFromDetailUrl,
+    hasUsefulTitle,
     toMeta
   }
 }
