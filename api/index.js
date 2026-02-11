@@ -152,7 +152,7 @@ function renderConfigureHtml(origin, config) {
     <h3>Support & Community</h3>
     <p>If this addon is useful for you, you can support development or join the community:</p>
     <div class="actions">
-      <a class="btn" href="https://ko-fi.com/thsandorh" target="_blank" rel="noopener noreferrer">Support on Ko-fi</a>
+      <a class="btn" href="https://ko-fi.com/sandortoth" target="_blank" rel="noopener noreferrer">Support on Ko-fi</a>
       <a class="btn ghost" href="https://discord.gg/GnKRAwwdcQ" target="_blank" rel="noopener noreferrer">Discord Server</a>
     </div>
   </div>
