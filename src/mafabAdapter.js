@@ -291,7 +291,9 @@ function parsePage(html, pageUrl) {
     })
   })
 
-  return rows
+  const workers = Array.from({ length: Math.max(1, concurrency) }, () => worker())
+  await Promise.allSettled(workers)
+  return out
 }
 
 async function enrichRows(rows, { type = 'movie', maxItems = 30, concurrency = 4 } = {}) {
