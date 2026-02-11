@@ -202,10 +202,7 @@ function renderConfigureHtml(origin, config, currentToken = null) {
   }
 
   form.addEventListener('change', updateLinks)
-  if (!location.pathname.startsWith('/' + initialToken + '/')) {
-    const defaultConfigure = location.origin + '/' + initialToken + '/configure'
-    history.replaceState(null, '', defaultConfigure)
-  }
+  form.addEventListener('input', updateLinks)
   updateLinks()
 </script>
 </body>
