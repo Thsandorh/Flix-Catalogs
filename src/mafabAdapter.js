@@ -362,7 +362,6 @@ async function enrichRows(rows, { type = 'movie', maxItems = 30, concurrency = 4
 
       if (best?.year) row.year = best.year
       if (best?.url) row.url = best.url
-      if (best?.foto) row.mafabPoster = best.foto
 
       const tmdbTitles = [row.name, row.seedTitle, row.lookupTitle].map((v) => normalizeTitle(v)).filter((v, i, a) => v && a.indexOf(v) === i)
       for (const tmdbTitle of tmdbTitles) {
@@ -394,7 +393,7 @@ function toId(url, imdb) {
 function toMeta(row, { type = 'movie' } = {}) {
   const imdbId = row.imdbId || extractImdbId(row.url)
   const id = toId(row.url, imdbId)
-  const poster = imdbId ? `https://images.metahub.space/poster/medium/${imdbId}/img` : (row.mafabPoster || undefined)
+  const poster = imdbId ? `https://images.metahub.space/poster/medium/${imdbId}/img` : undefined
 
   return {
     id,
@@ -449,7 +448,7 @@ async function fetchCatalog({ type = 'movie', catalogId = 'hu-mixed', genre, ski
   })
 
   let metas = enrichedRows.map((row) => toMeta(row, { type: metaType }))
-  metas = metas.filter((m) => Boolean(m.name))
+  metas = metas.filter((m) => Boolean(m.name) && Boolean(m.imdb_id))
   metas = dedupeMetasByName(metas)
 
   const withPoster = metas.filter((m) => Boolean(m.poster))
