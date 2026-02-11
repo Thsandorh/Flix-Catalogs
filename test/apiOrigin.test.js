@@ -63,3 +63,55 @@ test('tokenized manifest endpoint returns catalogs without server error', async 
   assert.ok(Array.isArray(payload.catalogs))
   assert.ok(payload.catalogs.length > 0)
 })
+
+
+test('manifest endpoint includes absolute logo url', async () => {
+  const token = encodeConfig({ sources: { mafab: true } })
+  const req = {
+    url: `/${token}/manifest.json`,
+    headers: {
+      'x-forwarded-proto': 'https',
+      'x-forwarded-host': 'flix.example.com'
+    }
+  }
+
+  let body = ''
+  const res = {
+    statusCode: 0,
+    setHeader() {},
+    end(chunk = '') {
+      body += chunk
+    }
+  }
+
+  await apiHandler(req, res)
+
+  assert.equal(res.statusCode, 200)
+  const payload = JSON.parse(body)
+  assert.equal(payload.logo, 'https://flix.example.com/logo.svg')
+})
+
+test('logo svg endpoint returns image content type', async () => {
+  const req = {
+    url: '/logo.svg',
+    headers: { host: 'localhost:7000' }
+  }
+
+  let body = ''
+  const headers = {}
+  const res = {
+    statusCode: 0,
+    setHeader(name, value) {
+      headers[name.toLowerCase()] = value
+    },
+    end(chunk = '') {
+      body += chunk
+    }
+  }
+
+  await apiHandler(req, res)
+
+  assert.equal(res.statusCode, 200)
+  assert.match(headers['content-type'], /image\/svg\+xml/)
+  assert.match(body, /<svg/)
+})
