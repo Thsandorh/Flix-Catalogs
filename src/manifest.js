@@ -45,7 +45,7 @@ function createManifest(config) {
 
   return {
     id: 'community.flix.catalogs',
-    version: '2.0.2',
+    version: '2.0.3',
     name: 'Flix-Catalogs',
     description: `Configurable catalogs from ${sources.length ? sources.join(' + ') : 'selected sources'}.`,
     resources: ['catalog', 'meta', 'stream'],

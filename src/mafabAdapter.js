@@ -68,6 +68,29 @@ const TMDB_CACHE = new Map()
 const execFileAsync = promisify(execFile)
 
 async function fetchMafabText(url, { params = null, useAjaxHeaders = false } = {}) {
+  const timeoutMs = Number(process.env.MAFAB_HTTP_TIMEOUT_MS || 12000)
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept-Language': 'hu-HU,hu;q=0.9,en;q=0.8'
+  }
+  if (useAjaxHeaders) {
+    headers.Referer = 'https://www.mafab.hu/'
+    headers['X-Requested-With'] = 'XMLHttpRequest'
+  }
+
+  try {
+    const response = await http.get(url, {
+      params: params && Object.keys(params).length ? params : undefined,
+      headers,
+      timeout: timeoutMs
+    })
+
+    if (typeof response.data === 'string') return response.data
+    return JSON.stringify(response.data)
+  } catch {
+    // Fall back to curl for environments where Mafab blocks plain HTTP clients.
+  }
+
   const args = ['-sL', '--max-time', String(Math.ceil(Number(process.env.MAFAB_HTTP_TIMEOUT_MS || 12000) / 1000) || 12)]
   args.push('-A', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
   args.push('-H', 'Accept-Language: hu-HU,hu;q=0.9,en;q=0.8')

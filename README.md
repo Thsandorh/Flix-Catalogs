@@ -30,6 +30,15 @@ Open:
 - Configure page: `http://127.0.0.1:7000/configure`
 - Manifest: `http://127.0.0.1:7000/manifest.json`
 
+## cPanel / CloudLinux Node.js beallitas
+
+- Application root: a projekt gyokerkonyvtara (ahol a `package.json` van)
+- Application URL: `/` vagy `/addon-path`
+- Application startup file: `server.js`
+- Environment variables:
+  - `APP_BASE_PATH` = ures (`""`) ha Application URL `/`, kulonben ugyanaz az utvonal (pl. `/addon-path`)
+  - `PORT` = opcionlis (ha cPanel automatikusan adja, nem kell kezileg beallitani)
+
 ## Configured manifest URL format
 
 `http://host/<base64url-config>/manifest.json`
@@ -54,6 +63,7 @@ Example config object:
 
 ## Environment variables
 
+- `APP_BASE_PATH` (default: empty, example: `/addon-path`)
 - `PORT` (default: `7000`)
 - `CATALOG_LIMIT` (default: `50`, max: `100`)
 - `MAFAB_HTTP_TIMEOUT_MS` (default: `12000`)

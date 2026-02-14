@@ -1,3 +1,5 @@
+const fs = require('node:fs')
+const path = require('node:path')
 const { createManifest } = require('../src/manifest')
 const {
   MAFAB_CATALOG_IDS,
@@ -14,8 +16,28 @@ const {
 } = require('../src/sourceRouter')
 
 
-const LOGO_SVG = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%' stop-color='#5b7cff'/><stop offset='100%' stop-color='#00c2ff'/></linearGradient></defs><rect width='256' height='256' rx='56' fill='#0f1530'/><path d='M58 62h140v36H98v28h84v34H98v36h100v36H58V62z' fill='url(#g)'/><rect x='170' y='62' width='28' height='170' fill='#ffffff' opacity='0.9'/></svg>`
+const DEFAULT_LOGO_SVG = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%' stop-color='#5b7cff'/><stop offset='100%' stop-color='#00c2ff'/></linearGradient></defs><rect width='256' height='256' rx='56' fill='#0f1530'/><path d='M58 62h140v36H98v28h84v34H98v36h100v36H58V62z' fill='url(#g)'/><rect x='170' y='62' width='28' height='170' fill='#ffffff' opacity='0.9'/></svg>`
+const ICON_FILE = path.join(__dirname, '..', 'assets', 'logo.svg')
+const LOGO_SVG = fs.existsSync(ICON_FILE) ? fs.readFileSync(ICON_FILE, 'utf8') : DEFAULT_LOGO_SVG
+const PNG_ICON_FILE = path.join(__dirname, '..', 'assets', 'logo.png')
+const LOGO_PNG = fs.existsSync(PNG_ICON_FILE) ? fs.readFileSync(PNG_ICON_FILE) : null
 
+
+function normalizeBasePath(value) {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw || raw === '/') return ''
+
+  let out = raw
+  if (!out.startsWith('/')) out = `/${out}`
+  out = out.replace(/\/+$/, '')
+  return out === '/' ? '' : out
+}
+
+function getBasePath(req) {
+  const headerBasePath = req?.headers?.['x-app-base-path']
+  const fromHeader = Array.isArray(headerBasePath) ? headerBasePath[0] : headerBasePath
+  return normalizeBasePath(fromHeader || process.env.APP_BASE_PATH || '')
+}
 
 function setCorsHeaders(res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -87,12 +109,17 @@ function getRequestOrigin(req) {
   return `${protocol}://${host}`
 }
 
-function renderConfigureHtml(origin, config) {
+function buildPath(basePath, suffix) {
+  return `${basePath}${suffix}`
+}
+
+function renderConfigureHtml(origin, config, basePath) {
   const token = encodeConfig(config)
   const defaultToken = encodeConfig(defaultConfig())
   const useTokenizedPath = token !== defaultToken
-  const manifestPath = useTokenizedPath ? `/${token}/manifest.json` : '/manifest.json'
-  const configurePath = useTokenizedPath ? `/${token}/configure` : '/configure'
+  const manifestPath = useTokenizedPath
+    ? buildPath(basePath, `/${token}/manifest.json`)
+    : buildPath(basePath, '/manifest.json')
   const manifestUrl = `${origin}${manifestPath}`
   const stremioManifest = manifestUrl.replace(/^https?:\/\//, '')
   const stremioUrl = `stremio://${stremioManifest}`
@@ -179,6 +206,7 @@ function renderConfigureHtml(origin, config) {
   const installBtn = document.getElementById('installBtn')
   const manifestEl = document.getElementById('manifestUrl')
   const defaultToken = ${JSON.stringify(encodeConfig(defaultConfig()))}
+  const basePath = ${JSON.stringify(basePath)}
 
   function encodeConfigToken(cfg) {
     const json = JSON.stringify(cfg)
@@ -212,8 +240,12 @@ function renderConfigureHtml(origin, config) {
     const cfg = buildConfig()
     const token = encodeConfigToken(cfg)
     const useTokenizedPath = token !== defaultToken
-    const manifestPath = useTokenizedPath ? '/' + token + '/manifest.json' : '/manifest.json'
-    const configurePath = useTokenizedPath ? '/' + token + '/configure' : '/configure'
+    const manifestPath = useTokenizedPath
+      ? basePath + '/' + token + '/manifest.json'
+      : basePath + '/manifest.json'
+    const configurePath = useTokenizedPath
+      ? basePath + '/' + token + '/configure'
+      : basePath + '/configure'
     const manifest = location.origin + manifestPath
     manifestEl.textContent = manifest
     installBtn.href = 'stremio://' + manifest.replace(/^https?:\\/\\//, '')
@@ -240,28 +272,35 @@ module.exports = async (req, res) => {
     const { token, rest } = parseRequestContext(url.pathname)
     const config = normalizeConfig(decodeConfig(token) || defaultConfig())
     const manifest = createManifest(config)
+    const basePath = getBasePath(req)
 
     if (url.pathname === '/') {
-      setCorsHeaders(res)
-      res.statusCode = 302
-      res.setHeader('Location', '/configure')
-      return res.end('Redirecting to /configure')
+      return sendHtml(res, 200, renderConfigureHtml(getRequestOrigin(req), config, basePath))
     }
 
     if (rest.length === 1 && rest[0] === 'configure') {
-      return sendHtml(res, 200, renderConfigureHtml(getRequestOrigin(req), config))
+      return sendHtml(res, 200, renderConfigureHtml(getRequestOrigin(req), config, basePath))
     }
 
     if (rest.length === 1 && rest[0] === 'manifest.json') {
+      const origin = getRequestOrigin(req)
       return sendJson(
         res,
         200,
         {
           ...manifest,
-          logo: '/logo.svg'
+          logo: `${origin}${buildPath(basePath, LOGO_PNG ? '/logo.png' : '/logo.svg')}`
         },
         'public, max-age=300'
       )
+    }
+
+    if (rest.length === 1 && rest[0] === 'logo.png' && LOGO_PNG) {
+      setCorsHeaders(res)
+      res.statusCode = 200
+      res.setHeader('Content-Type', 'image/png')
+      res.setHeader('Cache-Control', 'public, max-age=86400')
+      return res.end(LOGO_PNG)
     }
 
     if (rest.length === 1 && rest[0] === 'logo.svg') {
