@@ -3,6 +3,7 @@ const { URL } = require('node:url')
 
 const axios = require('axios')
 const cheerio = require('cheerio')
+const { createLruTtlCache } = require('./cache')
 
 const SOURCE_NAME = 'port.hu'
 const DEFAULT_TIMEOUT_MS = Number(process.env.PORT_HU_HTTP_TIMEOUT_MS || 12000)
@@ -12,10 +13,22 @@ const DETAIL_CONCURRENCY = Number(process.env.PORT_HU_DETAIL_CONCURRENCY || 8)
 
 const SOURCE_URLS = ['https://port.hu/film', 'https://port.hu/tv', 'https://port.hu/mozi', 'https://port.hu']
 
-const META_CACHE = new Map()
-const DETAIL_CACHE = new Map()
-const PAGE_CACHE = new Map()
-const CATALOG_CACHE = new Map()
+const META_CACHE = createLruTtlCache({
+  maxEntries: Number(process.env.PORT_HU_META_CACHE_MAX || 6000),
+  defaultTtlMs: Number(process.env.PORT_HU_META_CACHE_TTL_MS || 12 * 60 * 60 * 1000)
+})
+const DETAIL_CACHE = createLruTtlCache({
+  maxEntries: Number(process.env.PORT_HU_DETAIL_CACHE_MAX || 4000),
+  defaultTtlMs: Number(process.env.PORT_HU_DETAIL_CACHE_TTL_MS || 2 * 60 * 60 * 1000)
+})
+const PAGE_CACHE = createLruTtlCache({
+  maxEntries: Number(process.env.PORT_HU_PAGE_CACHE_MAX || 64),
+  defaultTtlMs: PAGE_CACHE_TTL_MS
+})
+const CATALOG_CACHE = createLruTtlCache({
+  maxEntries: Number(process.env.PORT_HU_CATALOG_CACHE_MAX || 256),
+  defaultTtlMs: CATALOG_CACHE_TTL_MS
+})
 
 const http = axios.create({
   timeout: DEFAULT_TIMEOUT_MS,
@@ -316,15 +329,14 @@ function uniqueRows(rows) {
 }
 
 async function fetchOneCatalogPage(url) {
-  const now = Date.now()
   const cached = PAGE_CACHE.get(url)
-  if (cached && cached.expiresAt > now) return cached.rows
+  if (cached) return cached
 
   const { data } = await http.get(url)
   const $ = cheerio.load(data)
   const rows = [...parseJsonLdBlocks($, url), ...parseDomCards($, url)]
 
-  PAGE_CACHE.set(url, { rows, expiresAt: now + PAGE_CACHE_TTL_MS })
+  PAGE_CACHE.set(url, rows)
   return rows
 }
 
@@ -335,9 +347,8 @@ function catalogCacheKey({ genre, skip, limit }) {
 async function fetchCatalog({ catalogId = 'hu-mixed', genre, skip = 0, limit = 50 }) {
   if (catalogId.startsWith('mafab-')) return { source: SOURCE_NAME, metas: [] }
   const key = catalogCacheKey({ genre, skip, limit })
-  const now = Date.now()
   const cached = CATALOG_CACHE.get(key)
-  if (cached && cached.expiresAt > now) return cached.payload
+  if (cached) return cached
 
   const errors = []
   const settled = await Promise.allSettled(SOURCE_URLS.map((url) => fetchOneCatalogPage(url)))
@@ -373,7 +384,7 @@ async function fetchCatalog({ catalogId = 'hu-mixed', genre, skip = 0, limit = 5
     warnings: errors.length ? errors : undefined
   }
 
-  CATALOG_CACHE.set(key, { payload, expiresAt: now + CATALOG_CACHE_TTL_MS })
+  CATALOG_CACHE.set(key, payload)
   return payload
 }
 

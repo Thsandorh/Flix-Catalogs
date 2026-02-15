@@ -2,6 +2,7 @@ const axios = require('axios')
 const cheerio = require('cheerio')
 const { execFile } = require('node:child_process')
 const { promisify } = require('node:util')
+const { createLruTtlCache } = require('./cache')
 
 const SOURCE_NAME = 'mafab.hu'
 const CURRENT_YEAR = Number(process.env.MAFAB_YEAR_TO || new Date().getFullYear())
@@ -61,9 +62,28 @@ const AUTOCOMPLETE_ENDPOINT = 'https://www.mafab.hu/js/autocomplete.php'
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3'
 const DEFAULT_TMDB_API_KEY = 'ffe7ef8916c61835264d2df68276ddc2'
 
-const META_CACHE = new Map()
-const AUTOCOMPLETE_CACHE = new Map()
-const TMDB_CACHE = new Map()
+const FETCH_CONCURRENCY = Number(process.env.MAFAB_FETCH_CONCURRENCY || 3)
+const PARSE_MAX_ROWS = Number(process.env.MAFAB_PARSE_MAX_ROWS || 1200)
+const ENRICH_MAX_ITEMS = Number(process.env.MAFAB_ENRICH_MAX || 120)
+const ENRICH_CONCURRENCY = Number(process.env.MAFAB_ENRICH_CONCURRENCY || 4)
+const CATALOG_STORE_MAX = Number(process.env.MAFAB_CATALOG_STORE_MAX || 800)
+
+const META_CACHE = createLruTtlCache({
+  maxEntries: Number(process.env.MAFAB_META_CACHE_MAX || 12000),
+  defaultTtlMs: Number(process.env.MAFAB_META_CACHE_TTL_MS || 12 * 60 * 60 * 1000)
+})
+const AUTOCOMPLETE_CACHE = createLruTtlCache({
+  maxEntries: Number(process.env.MAFAB_AUTOCOMPLETE_CACHE_MAX || 8000),
+  defaultTtlMs: Number(process.env.MAFAB_AUTOCOMPLETE_CACHE_TTL_MS || 24 * 60 * 60 * 1000)
+})
+const TMDB_CACHE = createLruTtlCache({
+  maxEntries: Number(process.env.MAFAB_TMDB_CACHE_MAX || 20000),
+  defaultTtlMs: Number(process.env.MAFAB_TMDB_CACHE_TTL_MS || 7 * 24 * 60 * 60 * 1000)
+})
+const CATALOG_CACHE = createLruTtlCache({
+  maxEntries: Number(process.env.MAFAB_CATALOG_CACHE_MAX || 128),
+  defaultTtlMs: Number(process.env.MAFAB_CATALOG_CACHE_TTL_MS || 10 * 60 * 1000)
+})
 
 const execFileAsync = promisify(execFile)
 
@@ -388,6 +408,8 @@ function parsePage(html, pageUrl) {
       year: null,
       imdbId: null
     })
+
+    if (rows.length >= PARSE_MAX_ROWS) return false
   })
 
   return rows
@@ -435,6 +457,27 @@ async function enrichRows(rows, { type = 'movie', maxItems = 30, concurrency = 4
   return out
 }
 
+async function runWithConcurrency(items, limit, worker) {
+  const queue = [...items]
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, queue.length)) }, async () => {
+    while (queue.length) {
+      const item = queue.shift()
+      if (!item) break
+      await worker(item)
+    }
+  })
+  await Promise.allSettled(workers)
+}
+
+function uniqueRowsByUrl(rows) {
+  const map = new Map()
+  for (const row of rows) {
+    if (!row?.url) continue
+    if (!map.has(row.url)) map.set(row.url, row)
+  }
+  return [...map.values()]
+}
+
 function toId(url, imdb) {
   if (imdb) return imdb
   const m = String(url || '').match(/\/movies\/([^/]+)\.html/i)
@@ -476,27 +519,45 @@ function dedupeMetasByName(metas) {
   return [...map.values()]
 }
 
+function catalogCacheKey({ type, catalogId, genre }) {
+  return `${type || ''}|${catalogId || ''}|${genre || ''}`
+}
+
 async function fetchCatalog({ type = 'movie', catalogId = 'hu-mixed', genre, skip = 0, limit = 50 }) {
   if (catalogId.startsWith('porthu-')) return { source: SOURCE_NAME, metas: [] }
   const urls = CATALOG_SOURCES[catalogId] || SOURCE_URLS
 
-  const settled = await Promise.allSettled(urls.map(async (u) => ({ data: await fetchMafabText(u) })))
+  const cacheKey = catalogCacheKey({ type, catalogId, genre })
+  const cached = CATALOG_CACHE.get(cacheKey)
+  if (cached) {
+    return {
+      source: SOURCE_NAME,
+      skip,
+      limit,
+      metas: (cached.metas || []).slice(skip, skip + limit),
+      warnings: cached.warnings
+    }
+  }
+
   const rows = []
   const warnings = []
 
-  for (let i = 0; i < settled.length; i += 1) {
-    const item = settled[i]
-    if (item.status === 'fulfilled') rows.push(...parsePage(item.value.data, urls[i]))
-    else warnings.push(`${urls[i]}: ${item.reason?.message || 'failed'}`)
-  }
+  await runWithConcurrency(urls, FETCH_CONCURRENCY, async (u) => {
+    try {
+      const html = await fetchMafabText(u)
+      rows.push(...parsePage(html, u))
+    } catch (e) {
+      warnings.push(`${u}: ${e?.message || 'failed'}`)
+    }
+  })
 
-  const uniqueRows = [...new Map(rows.map((r) => [r.url, r])).values()]
+  const uniqueRows = uniqueRowsByUrl(rows)
   const metaType = catalogId === 'mafab-series' || catalogId === 'mafab-series-lists' || catalogId === 'mafab-tv' || type === 'series' ? 'series' : 'movie'
 
   const enrichedRows = await enrichRows(uniqueRows, {
     type: metaType,
-    maxItems: Number(process.env.MAFAB_ENRICH_MAX || 200),
-    concurrency: Number(process.env.MAFAB_ENRICH_CONCURRENCY || 8)
+    maxItems: ENRICH_MAX_ITEMS,
+    concurrency: ENRICH_CONCURRENCY
   })
 
   let metas = enrichedRows.map((row) => toMeta(row, { type: metaType }))
@@ -511,6 +572,12 @@ async function fetchCatalog({ type = 'movie', catalogId = 'hu-mixed', genre, ski
     const g = genre.toLowerCase()
     metas = metas.filter((m) => (m.name || '').toLowerCase().includes(g))
   }
+
+  const storeMetas = metas.slice(0, Math.max(0, CATALOG_STORE_MAX))
+  CATALOG_CACHE.set(cacheKey, {
+    metas: storeMetas,
+    warnings: warnings.length ? warnings : undefined
+  })
 
   metas.forEach((m) => META_CACHE.set(m.id, m))
 
