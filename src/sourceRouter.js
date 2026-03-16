@@ -56,29 +56,39 @@ async function fetchCatalogFromSources(config, { type, catalogId, genre, skip, l
 
 async function fetchMetaFromSources(config, { id }) {
   const adapters = selectedAdapters(config)
-  for (const a of adapters) {
-    try {
-      const out = await a.fetchMeta({ id })
+  if (!adapters.length) return { meta: null }
+
+  const promises = adapters.map((a) =>
+    a.fetchMeta({ id }).then((out) => {
       if (out?.meta) return { meta: out.meta }
-    } catch {
-      // no-op
-    }
+      throw new Error('not found')
+    })
+  )
+
+  try {
+    return await Promise.any(promises)
+  } catch {
+    return { meta: null }
   }
-  return { meta: null }
 }
 
 async function fetchStreamsFromSources(config, { type, id }) {
   if (config?.features?.externalLinks === false) return { streams: [] }
   const adapters = selectedAdapters(config)
-  for (const a of adapters) {
-    try {
-      const out = await a.fetchStreams({ type, id, config })
+  if (!adapters.length) return { streams: [] }
+
+  const promises = adapters.map((a) =>
+    a.fetchStreams({ type, id, config }).then((out) => {
       if (out?.streams?.length) return out
-    } catch {
-      // no-op
-    }
+      throw new Error('no streams')
+    })
+  )
+
+  try {
+    return await Promise.any(promises)
+  } catch {
+    return { streams: [] }
   }
-  return { streams: [] }
 }
 
 module.exports = {
