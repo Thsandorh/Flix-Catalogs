@@ -39,23 +39,39 @@ function getBasePath(req) {
   return normalizeBasePath(fromHeader || process.env.APP_BASE_PATH || '')
 }
 
-function setCorsHeaders(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*')
+function setCorsHeaders(req, res) {
+  const originHeader = req?.headers?.origin
+  const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '*')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+
+  let origin = '*'
+  if (allowedOrigins.includes('*')) {
+    origin = '*'
+  } else if (originHeader && allowedOrigins.includes(originHeader)) {
+    origin = originHeader
+    res.setHeader('Vary', 'Origin')
+  } else if (allowedOrigins.length > 0) {
+    origin = allowedOrigins[0]
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', origin)
   res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', '*')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-App-Base-Path')
   res.setHeader('Access-Control-Max-Age', '86400')
 }
 
-function sendJson(res, statusCode, payload, cacheControl) {
-  setCorsHeaders(res)
+function sendJson(req, res, statusCode, payload, cacheControl) {
+  setCorsHeaders(req, res)
   res.statusCode = statusCode
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   if (cacheControl) res.setHeader('Cache-Control', cacheControl)
   res.end(JSON.stringify(payload))
 }
 
-function sendHtml(res, statusCode, html) {
-  setCorsHeaders(res)
+function sendHtml(req, res, statusCode, html) {
+  setCorsHeaders(req, res)
   res.statusCode = statusCode
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
   res.end(html)
@@ -263,7 +279,7 @@ function renderConfigureHtml(origin, config, basePath) {
 module.exports = async (req, res) => {
   try {
     if ((req.method || 'GET').toUpperCase() === 'OPTIONS') {
-      setCorsHeaders(res)
+      setCorsHeaders(req, res)
       res.statusCode = 204
       return res.end('')
     }
@@ -275,16 +291,17 @@ module.exports = async (req, res) => {
     const basePath = getBasePath(req)
 
     if (url.pathname === '/') {
-      return sendHtml(res, 200, renderConfigureHtml(getRequestOrigin(req), config, basePath))
+      return sendHtml(req, res, 200, renderConfigureHtml(getRequestOrigin(req), config, basePath))
     }
 
     if (rest.length === 1 && rest[0] === 'configure') {
-      return sendHtml(res, 200, renderConfigureHtml(getRequestOrigin(req), config, basePath))
+      return sendHtml(req, res, 200, renderConfigureHtml(getRequestOrigin(req), config, basePath))
     }
 
     if (rest.length === 1 && rest[0] === 'manifest.json') {
       const origin = getRequestOrigin(req)
       return sendJson(
+        req,
         res,
         200,
         {
@@ -296,7 +313,7 @@ module.exports = async (req, res) => {
     }
 
     if (rest.length === 1 && rest[0] === 'logo.png' && LOGO_PNG) {
-      setCorsHeaders(res)
+      setCorsHeaders(req, res)
       res.statusCode = 200
       res.setHeader('Content-Type', 'image/png')
       res.setHeader('Cache-Control', 'public, max-age=86400')
@@ -304,7 +321,7 @@ module.exports = async (req, res) => {
     }
 
     if (rest.length === 1 && rest[0] === 'logo.svg') {
-      setCorsHeaders(res)
+      setCorsHeaders(req, res)
       res.statusCode = 200
       res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8')
       res.setHeader('Cache-Control', 'public, max-age=86400')
@@ -317,7 +334,7 @@ module.exports = async (req, res) => {
       const noExtra = id && id.endsWith('.json')
       const catalogId = noExtra ? id.slice(0, -5) : id
 
-      if (!['movie', 'series'].includes(type)) return sendJson(res, 200, { metas: [] })
+      if (!['movie', 'series'].includes(type)) return sendJson(req, res, 200, { metas: [] })
 
       const extra = {
         ...(extraPath ? parseExtraString(extraPath) : {}),
@@ -327,25 +344,25 @@ module.exports = async (req, res) => {
       const limit = Math.min(Number(process.env.CATALOG_LIMIT || 50), 100)
       const skip = Math.max(Number(extra.skip || 0), 0)
       const { metas } = await fetchCatalogFromSources(config, { type, catalogId, genre: extra.genre, skip, limit })
-      return sendJson(res, 200, { metas }, 'public, s-maxage=300, stale-while-revalidate=600')
+      return sendJson(req, res, 200, { metas }, 'public, s-maxage=300, stale-while-revalidate=600')
     }
 
     if (rest[0] === 'meta' && rest.length >= 3) {
       const id = decodeURIComponent((rest[2] || '').replace(/\.json$/, ''))
       const { meta } = await fetchMetaFromSources(config, { id })
-      return sendJson(res, 200, { meta: meta || null }, 'public, max-age=300')
+      return sendJson(req, res, 200, { meta: meta || null }, 'public, max-age=300')
     }
 
     if (rest[0] === 'stream' && rest.length >= 3) {
       const type = rest[1]
       const id = decodeURIComponent((rest[2] || '').replace(/\.json$/, ''))
       const out = await fetchStreamsFromSources(config, { type, id })
-      return sendJson(res, 200, { streams: out.streams || [] }, 'public, max-age=300')
+      return sendJson(req, res, 200, { streams: out.streams || [] }, 'public, max-age=300')
     }
 
-    return sendJson(res, 404, { error: 'Not found' })
+    return sendJson(req, res, 404, { error: 'Not found' })
   } catch (error) {
-    return sendJson(res, 500, {
+    return sendJson(req, res, 500, {
       error: 'Internal server error',
       message: error.message
     })

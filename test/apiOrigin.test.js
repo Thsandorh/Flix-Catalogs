@@ -138,7 +138,7 @@ test('logo svg endpoint returns image content type', async () => {
 test('manifest endpoint returns CORS headers for web fetch', async () => {
   const req = {
     url: '/manifest.json',
-    headers: { host: 'localhost:7000' }
+    headers: { host: 'localhost:7000', origin: 'http://localhost:7000' }
   }
 
   let body = ''
@@ -165,7 +165,7 @@ test('options preflight returns 204 with CORS headers', async () => {
   const req = {
     method: 'OPTIONS',
     url: '/manifest.json',
-    headers: { host: 'localhost:7000' }
+    headers: { host: 'localhost:7000', origin: 'http://localhost:7000' }
   }
 
   const headers = {}
