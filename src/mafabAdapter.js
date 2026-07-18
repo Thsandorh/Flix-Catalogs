@@ -67,6 +67,9 @@ const PARSE_MAX_ROWS = Number(process.env.MAFAB_PARSE_MAX_ROWS || 1200)
 const ENRICH_MAX_ITEMS = Number(process.env.MAFAB_ENRICH_MAX || 120)
 const ENRICH_CONCURRENCY = Number(process.env.MAFAB_ENRICH_CONCURRENCY || 4)
 const CATALOG_STORE_MAX = Number(process.env.MAFAB_CATALOG_STORE_MAX || 800)
+const GLOBAL_HTTP_CONCURRENCY = positiveInt(process.env.MAFAB_GLOBAL_HTTP_CONCURRENCY, 3)
+const CATALOG_BUILD_CONCURRENCY = positiveInt(process.env.MAFAB_CATALOG_BUILD_CONCURRENCY, 1)
+const CATALOG_FIRST_BUILD_WAIT_MS = positiveInt(process.env.MAFAB_CATALOG_FIRST_BUILD_WAIT_MS, 2500)
 
 const META_CACHE = createLruTtlCache({
   maxEntries: Number(process.env.MAFAB_META_CACHE_MAX || 12000),
@@ -84,10 +87,44 @@ const CATALOG_CACHE = createLruTtlCache({
   maxEntries: Number(process.env.MAFAB_CATALOG_CACHE_MAX || 128),
   defaultTtlMs: Number(process.env.MAFAB_CATALOG_CACHE_TTL_MS || 10 * 60 * 1000)
 })
+const CATALOG_STALE_CACHE = createLruTtlCache({
+  maxEntries: Number(process.env.MAFAB_CATALOG_STALE_CACHE_MAX || 128),
+  defaultTtlMs: Number(process.env.MAFAB_CATALOG_STALE_CACHE_TTL_MS || 6 * 60 * 60 * 1000)
+})
 
 const execFileAsync = promisify(execFile)
+const CATALOG_INFLIGHT = new Map()
+const limitMafabHttp = createLimiter(GLOBAL_HTTP_CONCURRENCY)
+const limitCatalogBuild = createLimiter(CATALOG_BUILD_CONCURRENCY)
+
+function positiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ''), 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function createLimiter(limit) {
+  const max = Math.max(1, positiveInt(limit, 1))
+  let active = 0
+  const queue = []
+
+  return async function runLimited(task) {
+    if (active >= max) {
+      await new Promise((resolve) => queue.push(resolve))
+    }
+
+    active += 1
+    try {
+      return await task()
+    } finally {
+      active -= 1
+      const next = queue.shift()
+      if (next) next()
+    }
+  }
+}
 
 async function fetchMafabText(url, { params = null, useAjaxHeaders = false } = {}) {
+  return limitMafabHttp(async () => {
   const timeoutMs = Number(process.env.MAFAB_HTTP_TIMEOUT_MS || 12000)
   const headers = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -130,6 +167,7 @@ async function fetchMafabText(url, { params = null, useAjaxHeaders = false } = {
 
   const { stdout } = await execFileAsync('curl', args, { maxBuffer: 8 * 1024 * 1024 })
   return String(stdout || '')
+  })
 }
 
 const http = axios.create({
@@ -523,22 +561,49 @@ function catalogCacheKey({ type, catalogId, genre }) {
   return `${type || ''}|${catalogId || ''}|${genre || ''}`
 }
 
-async function fetchCatalog({ type = 'movie', catalogId = 'hu-mixed', genre, skip = 0, limit = 50 }) {
-  if (catalogId.startsWith('porthu-')) return { source: SOURCE_NAME, metas: [] }
-  const urls = CATALOG_SOURCES[catalogId] || SOURCE_URLS
-
-  const cacheKey = catalogCacheKey({ type, catalogId, genre })
-  const cached = CATALOG_CACHE.get(cacheKey)
-  if (cached) {
+function catalogPayloadFromCache(cached, { skip, limit, stale = false } = {}) {
+  const warnings = Array.isArray(cached?.warnings) ? [...cached.warnings] : cached?.warnings ? [cached.warnings] : undefined
+  if (stale) {
+    const nextWarnings = warnings ? [...warnings] : []
+    nextWarnings.push('served stale Mafab catalog while refresh is rate-limited')
     return {
       source: SOURCE_NAME,
       skip,
       limit,
-      metas: (cached.metas || []).slice(skip, skip + limit),
-      warnings: cached.warnings
+      metas: (cached?.metas || []).slice(skip, skip + limit),
+      warnings: nextWarnings
     }
   }
 
+  return {
+    source: SOURCE_NAME,
+    skip,
+    limit,
+    metas: (cached?.metas || []).slice(skip, skip + limit),
+    warnings
+  }
+}
+
+function warmingCatalogPayload({ skip, limit } = {}) {
+  return {
+    source: SOURCE_NAME,
+    skip,
+    limit,
+    metas: [],
+    warnings: ['Mafab catalog is warming in the background']
+  }
+}
+
+function promiseWithTimeout(promise, timeoutMs) {
+  const waitMs = Math.max(1, positiveInt(timeoutMs, 1))
+  const timeout = new Promise((resolve) => {
+    setTimeout(() => resolve(null), waitMs)
+  })
+  return Promise.race([promise, timeout])
+}
+
+async function buildCatalogPayload({ type, catalogId, genre }) {
+  const urls = CATALOG_SOURCES[catalogId] || SOURCE_URLS
   const rows = []
   const warnings = []
 
@@ -574,20 +639,53 @@ async function fetchCatalog({ type = 'movie', catalogId = 'hu-mixed', genre, ski
   }
 
   const storeMetas = metas.slice(0, Math.max(0, CATALOG_STORE_MAX))
-  CATALOG_CACHE.set(cacheKey, {
+  const payload = {
     metas: storeMetas,
     warnings: warnings.length ? warnings : undefined
-  })
+  }
+
+  const cacheKey = catalogCacheKey({ type, catalogId, genre })
+  CATALOG_CACHE.set(cacheKey, payload)
+  CATALOG_STALE_CACHE.set(cacheKey, payload)
 
   metas.forEach((m) => META_CACHE.set(m.id, m))
 
-  return {
-    source: SOURCE_NAME,
-    skip,
-    limit,
-    metas: metas.slice(skip, skip + limit),
-    warnings: warnings.length ? warnings : undefined
+  return payload
+}
+
+async function fetchCatalog({ type = 'movie', catalogId = 'hu-mixed', genre, skip = 0, limit = 50 }) {
+  if (catalogId.startsWith('porthu-')) return { source: SOURCE_NAME, metas: [] }
+
+  const cacheKey = catalogCacheKey({ type, catalogId, genre })
+  const cached = CATALOG_CACHE.get(cacheKey)
+  if (cached) return catalogPayloadFromCache(cached, { skip, limit })
+
+  const stale = CATALOG_STALE_CACHE.get(cacheKey)
+  const inflight = CATALOG_INFLIGHT.get(cacheKey)
+  if (inflight) {
+    if (stale) return catalogPayloadFromCache(stale, { skip, limit, stale: true })
+    const payload = await promiseWithTimeout(inflight, CATALOG_FIRST_BUILD_WAIT_MS)
+    if (!payload) return warmingCatalogPayload({ skip, limit })
+    return catalogPayloadFromCache(payload, { skip, limit })
   }
+
+  const buildPromise = limitCatalogBuild(() => buildCatalogPayload({ type, catalogId, genre }))
+    .finally(() => {
+      CATALOG_INFLIGHT.delete(cacheKey)
+    })
+  CATALOG_INFLIGHT.set(cacheKey, buildPromise)
+
+  if (stale) {
+    buildPromise.catch(() => {})
+    return catalogPayloadFromCache(stale, { skip, limit, stale: true })
+  }
+
+  const payload = await promiseWithTimeout(buildPromise, CATALOG_FIRST_BUILD_WAIT_MS)
+  if (!payload) {
+    buildPromise.catch(() => {})
+    return warmingCatalogPayload({ skip, limit })
+  }
+  return catalogPayloadFromCache(payload, { skip, limit })
 }
 
 async function fetchMeta({ id }) {
